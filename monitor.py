@@ -4,11 +4,13 @@ import subprocess
 import socket
 import asyncio
 from datetime import datetime
-import time
+import argparse
+from rich.table import Table
+from rich.console import Console
+import csv
+import json
 
-range_min = 1
-range_max = 254
-interval = 86400
+console = Console()
 
 def ping(host):
     param1 = '-n' if platform.system().lower() == 'windows' else '-c'
@@ -30,28 +32,79 @@ def resolve_host(host):
         return socket.gethostbyaddr(host)[0]
     except socket.herror:
         return None
+    
+def hist_csv(host, name_text, status_text, latency_text):
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    os.makedirs('historico_csv', exist_ok=True)
+    escrever_cabecalho = not os.path.exists(f'historico_csv/historico_{timestamp}.csv')
+    with open(f"historico_csv/historico_{timestamp}.csv", "a", encoding="utf-8") as f:
+        writer = csv.writer(f)
 
-async def tarefa(host):
+        if escrever_cabecalho:
+            writer.writerow(["Date", "Ip", "Hostname", "Satus", "Latency"])
+        
+        writer.writerow([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            host,
+            name_text,
+            status_text,
+            latency_text
+        ])
+
+def hist_json(host, name_text, status_text, latency_text):
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    dados_json = {
+        "timestamp": timestamp,
+        "ip": host,
+        "hostname": name_text,
+        "status": status_text,
+        "latency": latency_text
+    }
+    os.makedirs('historico_json', exist_ok=True)
+
+    with open(f"historico_json/historico_{timestamp}.json", "a", encoding="utf-8") as f:
+        json.dump(dados_json, f, ensure_ascii=False, indent=4)       
+    
+
+async def tarefa(host, table):
     hostname = await asyncio.to_thread(resolve_host, host)
     status, latency = await asyncio.to_thread(ping, host)
     status_text = "ONLINE ✅" if status else "OFFLINE ❌"
     name_text = hostname if hostname else "Desconhecido"
     latency_text = latency if latency else "--"
 
-    print(f"{host:<15} | {name_text:<30} | {status_text:<10} | Latência: {latency_text}")
+    table.add_row(host, name_text, status_text, latency_text)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d")
-    with open(f"historico_{timestamp}.csv", "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now()},{host},{name_text},{status_text},{latency_text}\n")
+    if args.csv:
+        hist_csv(host, name_text, status_text, latency_text)
+
+    if args.json:
+        hist_json(host, name_text, status_text, latency_text)
     
+
     return status
 
 async def main():
     tasks = []
+    subnet = args.subnet
+    range_min = args.start
+    range_max = args.end
+
+    table = Table(title='Scanner de Rede')
+    table.add_column("IP", style="cyan")
+    table.add_column("Hostname", style="magenta")
+    table.add_column("Status", style="green")
+    table.add_column("Latência", style="yellow")
+
+
     for number in range(range_min, range_max+1):
-        host = f'192.168.1.{number}'
-        tasks.append(tarefa(host))
+        host = f'{subnet}{number}'
+        tasks.append(tarefa(host, table))
+    
     resultados = await asyncio.gather(*tasks)
+
+    console.print(table)
+
     ativos = sum(1 for r in resultados if r)
     total = len(resultados)
     return total, ativos
@@ -59,11 +112,23 @@ async def main():
 
 async def run_forever():
     while True:
+        interval = args.interval
         print("\n--- Nova Varredura ---")
         n_total, n_ativo = await main()
         print(f'Total: {n_ativo} ativos / {n_total} no total')
-        print(f"\n[INFO] A aguardar {interval} segundos para a próxima varredura...\n")
-        await asyncio.sleep(interval)
+        if args.once: break
+        else:              
+            print(f"\n[INFO] A aguardar {interval} segundos para a próxima varredura...\n")
+            await asyncio.sleep(interval)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Scanner de rede')
+    parser.add_argument("--subnet", type=str, default="192.168.1.", help="Sub-rede base (ex.: 192.168.0.)")
+    parser.add_argument("--interval", type=int, default=30, help="Intervalo entre varreduras (segundos)")
+    parser.add_argument("--start", type=int, default=1, help="Inicio de host")
+    parser.add_argument("--end", type=int, default=254, help="Fim de host")
+    parser.add_argument("--once",action='store_true', help="Uma varredura apenas")
+    parser.add_argument("--json",action='store_true', help="Criar histórico em json")
+    parser.add_argument("--csv",action='store_true', help="Criar histórico em csv")
+    args = parser.parse_args()
     asyncio.run(run_forever())
